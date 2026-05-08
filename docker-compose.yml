@@ -1,0 +1,86 @@
+version: '3.9'
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB:       schoolmaster
+      POSTGRES_USER:     sm_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U sm_user -d schoolmaster"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── Redis ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test:     ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  3
+
+  # ── Backend API ─────────────────────────────────────────
+  api:
+    build:
+      context:    ./backend
+      dockerfile: Dockerfile
+    restart: always
+    env_file: .env
+    environment:
+      NODE_ENV:      production
+      DATABASE_URL:  postgresql://sm_user:${DB_PASSWORD}@db:5432/schoolmaster
+      REDIS_URL:     redis://:${REDIS_PASSWORD}@redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:     ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+
+  # ── TMA Frontend (served as static build) ───────────────
+  tma:
+    build:
+      context:    ./tma-frontend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+  # ── Caddy (Reverse Proxy + Auto SSL) ────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - tma
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
